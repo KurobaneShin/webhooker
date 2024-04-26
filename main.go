@@ -1,8 +1,11 @@
 package main
 
 import (
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gliderlabs/ssh"
@@ -10,7 +13,43 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
-func main() {
+var clients sync.Map
+
+type HTTPHandler struct{}
+
+func (h *HTTPHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	ch, ok := clients.Load(id)
+
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("client id not found"))
+		return
+	}
+
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer r.Body.Close()
+
+	ch.(chan string) <- string(b)
+}
+
+func startHttpServer() error {
+	port := ":5000"
+	router := http.NewServeMux()
+
+	handle := &HTTPHandler{}
+
+	router.HandleFunc("/{id}/*", handle.handleWebhook)
+
+	return http.ListenAndServe(port, router)
+}
+
+func startSshServer() {
 	sshPort := ":2222"
 
 	respCh := make(chan string)
@@ -28,9 +67,7 @@ func main() {
 		}
 	}()
 
-	handler := SSHHandler{
-		respCh: respCh,
-	}
+	handler := SSHHandler{}
 
 	server := ssh.Server{
 		Addr:    sshPort,
@@ -63,18 +100,23 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-type SSHHandler struct {
-	respCh chan string
+func main() {
+	go startSshServer()
+	startHttpServer()
 }
 
+type SSHHandler struct{}
+
 func (h *SSHHandler) handleSSHSession(session ssh.Session) {
-	forwardURL := session.RawCommand()
-	_ = forwardURL
-	resp := <-h.respCh
+	id := shortid.MustGenerate()
 
-	session.Write([]byte(resp + "\n"))
+	webhookUrl := "http://webhooker.com/" + id
+	session.Write([]byte(webhookUrl))
 
-	for data := range h.respCh {
+	respCh := make(chan string)
+	clients.Store(id, respCh)
+
+	for data := range respCh {
 		session.Write([]byte(data + "\n"))
 	}
 }
