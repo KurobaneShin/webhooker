@@ -1,20 +1,40 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/gliderlabs/ssh"
+	"github.com/teris-io/shortid"
 	gossh "golang.org/x/crypto/ssh"
 )
 
 func main() {
 	sshPort := ":2222"
 
+	respCh := make(chan string)
+
+	go func() {
+		time.Sleep(time.Second * 3)
+		id, _ := shortid.Generate()
+		respCh <- "http://webhooker.com/" + id
+
+		time.Sleep(time.Second * 5)
+
+		for {
+			time.Sleep(time.Second * 2)
+			respCh <- "webhook data received"
+		}
+	}()
+
+	handler := SSHHandler{
+		respCh: respCh,
+	}
+
 	server := ssh.Server{
 		Addr:    sshPort,
-		Handler: handleSSHSession,
+		Handler: handler.handleSSHSession,
 		ServerConfigCallback: func(ctx ssh.Context) *gossh.ServerConfig {
 			cfg := &gossh.ServerConfig{
 				ServerVersion: "SSH-2.0-sendit",
@@ -43,7 +63,18 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-func handleSSHSession(session ssh.Session) {
-	cmd := session.RawCommand()
-	fmt.Println("handling conn in ssh session ->", cmd)
+type SSHHandler struct {
+	respCh chan string
+}
+
+func (h *SSHHandler) handleSSHSession(session ssh.Session) {
+	forwardURL := session.RawCommand()
+	_ = forwardURL
+	resp := <-h.respCh
+
+	session.Write([]byte(resp + "\n"))
+
+	for data := range h.respCh {
+		session.Write([]byte(data + "\n"))
+	}
 }
