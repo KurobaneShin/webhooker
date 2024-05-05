@@ -67,7 +67,7 @@ func startSshServer() {
 		}
 	}()
 
-	handler := SSHHandler{}
+	handler := newSshHandler()
 
 	server := ssh.Server{
 		Addr:    sshPort,
@@ -105,18 +105,39 @@ func main() {
 	startHttpServer()
 }
 
-type SSHHandler struct{}
+type SSHHandler struct {
+	channels map[string]chan string
+}
+
+func newSshHandler() *SSHHandler {
+	return &SSHHandler{
+		channels: make(map[string]chan string),
+	}
+}
 
 func (h *SSHHandler) handleSSHSession(session ssh.Session) {
-	id := shortid.MustGenerate()
+	cmd := session.RawCommand()
 
-	webhookUrl := "http://webhooker.com/" + id
-	session.Write([]byte(webhookUrl))
+	if cmd == "init" {
 
-	respCh := make(chan string)
-	clients.Store(id, respCh)
+		id := shortid.MustGenerate()
 
-	for data := range respCh {
-		session.Write([]byte(data + "\n"))
+		webhookUrl := "http://webhooker.com/" + id + "\n"
+		session.Write([]byte(webhookUrl))
+		respCh := make(chan string)
+		h.channels[id] = respCh
+		clients.Store(id, respCh)
+		return
+	}
+
+	if len(cmd) > 0 {
+		respCh, ok := h.channels[cmd]
+		if !ok {
+			session.Write([]byte("invalid webhook Id\n"))
+		}
+
+		for data := range respCh {
+			session.Write([]byte(data + "\n"))
+		}
 	}
 }
